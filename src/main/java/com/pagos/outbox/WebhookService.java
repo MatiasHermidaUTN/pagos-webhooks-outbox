@@ -56,8 +56,7 @@ public class WebhookService {
     }
 
     private WebhookOutcome processOnce(WebhookRequest request) {
-        // SUPUESTO v1: no se sabe si el event_id se repite en los reintentos; se deduplica por (pago, estado, timestamp).
-        if (sameEventAlreadyStored(request)) {
+        if (eventExists(request.eventId())) {
             return WebhookOutcome.DUPLICATE;
         }
         OffsetDateTime now = OffsetDateTime.now(clock);
@@ -72,40 +71,41 @@ public class WebhookService {
         return inserted == 0 ? WebhookOutcome.DUPLICATE : outcome;
     }
 
-    private boolean sameEventAlreadyStored(WebhookRequest r) {
+    private boolean eventExists(String eventId) {
         Integer count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM payment_event WHERE payment_id = :paymentId AND status = :status"
-                        + " AND event_timestamp = :eventTimestamp",
-                new MapSqlParameterSource("paymentId", r.paymentId()).addValue("status", r.status().name())
-                        .addValue("eventTimestamp", r.timestamp()), Integer.class);
+                "SELECT COUNT(*) FROM payment_event WHERE event_id = :eventId",
+                new MapSqlParameterSource("eventId", eventId), Integer.class);
         return count != null && count > 0;
     }
 
     /** El primer evento que se ve de un pago lo crea con su estado. NOT EXISTS en vez de ON CONFLICT para que corra igual en H2. */
     private boolean createPaymentIfAbsent(WebhookRequest r, OffsetDateTime now) {
         return jdbc.update("""
-                INSERT INTO payment (payment_id, status, amount, currency, last_event_at, created_at, updated_at)
-                SELECT :paymentId, :status, :amount, :currency, :eventTimestamp, :now, :now
+                INSERT INTO payment (payment_id, status, amount, currency, created_at, updated_at)
+                SELECT :paymentId, :status, :amount, :currency, :now, :now
                  WHERE NOT EXISTS (SELECT 1 FROM payment WHERE payment_id = :paymentId)
                 """, params(r, now)) == 1;
     }
 
     /** Cambia el estado solo si el estado actual permite llegar al nuevo. */
     private boolean advanceStatus(WebhookRequest r, OffsetDateTime now) {
-        // SUPUESTO v1: gana siempre el evento con el timestamp mas nuevo, sin matriz de transiciones.
+        var allowedFrom = r.status().allowedFrom();
+        if (allowedFrom.isEmpty()) {
+            return false;
+        }
         return jdbc.update("""
                 UPDATE payment
-                   SET status = :status, amount = :amount, currency = :currency, version = version + 1,
-                       last_event_at = :eventTimestamp, updated_at = :now
-                 WHERE payment_id = :paymentId AND last_event_at < :eventTimestamp
-                """, params(r, now)) == 1;
+                   SET status = :status, amount = :amount, currency = :currency, version = version + 1, updated_at = :now
+                 WHERE payment_id = :paymentId AND status IN (:allowedFrom)
+                """, params(r, now).addValue("allowedFrom", allowedFrom)) == 1;
     }
 
     private int insertEvent(WebhookRequest r, OffsetDateTime now, WebhookOutcome outcome) {
         return jdbc.update("""
                 INSERT INTO payment_event (event_id, payment_id, status, amount, currency,
                                            event_timestamp, received_at, outcome)
-                VALUES (:eventId, :paymentId, :status, :amount, :currency, :eventTimestamp, :now, :outcome)
+                SELECT :eventId, :paymentId, :status, :amount, :currency, :eventTimestamp, :now, :outcome
+                 WHERE NOT EXISTS (SELECT 1 FROM payment_event WHERE event_id = :eventId)
                 """, params(r, now).addValue("outcome", outcome.name()));
     }
 

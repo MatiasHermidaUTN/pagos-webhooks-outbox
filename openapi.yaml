@@ -1,0 +1,96 @@
+openapi: 3.0.3
+info:
+  title: Receptor de webhooks de PayGate
+  version: 0.1.0
+paths:
+  /webhooks/paygate:
+    post:
+      summary: Recibe un evento de pago
+      description: >
+        Responde 200 para eventos nuevos, ignorados y reintentos (mismo event_id), porque PayGate solo
+        reintenta si no recibe un 2xx.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Webhook'
+      responses:
+        '200':
+          description: Evento procesado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResult'
+        '400':
+          description: Payload invalido
+  /payments/{paymentId}:
+    get:
+      summary: Estado consolidado de un pago
+      parameters:
+        - { name: paymentId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: El pago
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          description: No existe
+  /payments/{paymentId}/events:
+    get:
+      summary: Historial cronologico de eventos de un pago
+      parameters:
+        - { name: paymentId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Eventos ordenados por timestamp del evento
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentEvent'
+        '404':
+          description: No existe
+components:
+  schemas:
+    Status:
+      type: string
+      enum: [PENDING, AUTHORIZED, CAPTURED, FAILED, REFUNDED]
+    Webhook:
+      type: object
+      required: [event_id, payment_id, status, amount, currency, timestamp]
+      properties:
+        event_id: { type: string, maxLength: 64 }
+        payment_id: { type: string, maxLength: 64 }
+        status: { $ref: '#/components/schemas/Status' }
+        amount: { type: number, minimum: 0, example: 1500.00 }
+        currency: { type: string, pattern: '^[A-Z]{3}$', example: ARS }
+        timestamp: { type: string, format: date-time }
+    WebhookResult:
+      type: object
+      properties:
+        event_id: { type: string }
+        outcome: { type: string, enum: [APPLIED, IGNORED, DUPLICATE] }
+    Payment:
+      type: object
+      properties:
+        payment_id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+        amount: { type: number }
+        currency: { type: string }
+        version: { type: integer, format: int64, description: Sube en cada cambio de estado }
+        updated_at: { type: string, format: date-time }
+        event_count: { type: integer }
+    PaymentEvent:
+      type: object
+      properties:
+        event_id: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+        amount: { type: number }
+        currency: { type: string }
+        event_timestamp: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        outcome: { type: string, enum: [APPLIED, IGNORED] }
